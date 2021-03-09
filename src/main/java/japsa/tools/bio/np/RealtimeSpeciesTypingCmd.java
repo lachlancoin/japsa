@@ -34,8 +34,6 @@
  ****************************************************************************/
 package japsa.tools.bio.np;
 
-import org.slf4j.LoggerFactory;
-
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
@@ -109,7 +107,7 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 		addInt("minCount", 5, "Mininum number of mapped reads for a species to be considered");
 		addString("filter", "", "List of species (separated by semicolon) to excluded from typing");
 
-		addInt("readNum", 50,  "Minimum number of reads between analyses");		
+		addInt("read", 50,  "Minimum number of reads between analyses");		
 		addInt("time", 30,   "Minimum number of seconds between analyses");
 
 		addBoolean("web", false, "Whether to use Web visualization.");
@@ -166,7 +164,7 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 		double q_thresh = cmdLine.getDoubleVal("fail_thresh");
 		String filter = cmdLine.getStringVal("filter");
 		int maxReads = cmdLine.getIntVal("maxReads");
-		int number       = cmdLine.getIntVal("readNum");
+		int number       = cmdLine.getIntVal("read");
 		int time       = cmdLine.getIntVal("time");		
 		double qual      = cmdLine.getDoubleVal("qual");				
 		boolean twoOnly      = cmdLine.getBooleanVal("twodonly");
