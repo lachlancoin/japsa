@@ -1,10 +1,10 @@
 #!/bin/sh
 
-#SBATCH --job-name=jST
+#SBATCH --job-name=jRT
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --mem=32800 # mb
+#SBATCH --mem=15800 # mb
 #SBATCH --time=100:00:00
 #SBATCH --output=jst.stdout
 #SBATCH --error=jst.stderr
@@ -21,13 +21,12 @@
 ##tip - use symbolic link to put this in the directory with bam files
 #run as sbatch run_slurm.sh species --bamFile=file.bam 
 #  sbatch run_slurm_combined.sh human combined --RNA=false
-export JSA_MEM=31800m
+export JSA_MEM=15200m
 
 export japsa_coverage="${HOME}/github/japsa_coverage"
 echo ${japsa_coverage}
 
-species=$1
-bamfiles=$2
+bamfiles=$1
 
 	mainclass="japsa.tools.bio.np.RealtimeResistanceGeneCmd"
 	optsfile="opts_resistance.txt"
