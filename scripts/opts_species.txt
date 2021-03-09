@@ -1,0 +1,14 @@
+--merge=false
+--dbpath=/DataOnline/Data/Bacterial_Genome/Eskape/SpeciesTyping/
+--dbs=clinicaldb
+--qual=0  
+--fail_thresh=7
+--output fastq_pass_species.dat  
+--time 0  
+--log=false 
+#--maxReads=1000  
+--writeSep=true
+--mm2_path=/sw/minimap2/current/minimap2
+#--resDB=/DataOnline/Data/Bacterial_Genome/Eskape/ResistanceTyping/resFinder
+--minCount=2
+

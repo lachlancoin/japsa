@@ -15,8 +15,16 @@ import japsa.seq.SequenceOutputStream;
 
 /** this enables splitting of output sequences into species specific bams */
 public class CachedSequenceOutputStream extends CachedOutput {
-	
+	 public  void  getOutFile(List<String> fi){
+		  for(int i=0; i<l.size(); i++){
+			  if(l.get(i).printed>0) fi.add(outdir+"/"+ l.get(i).nme1);
+		  }
+	  }
+	 public int length(){
+		 return l.size();
+	 }
 	class Inner{
+		int printed=0;
 		  SequenceOutputStream fqw_os;
 		  Stack stack = new Stack();
 		  final String nme1;
@@ -38,6 +46,7 @@ public class CachedSequenceOutputStream extends CachedOutput {
 					  }
 					
 						  while(stack.size()>0){
+							  printed++;
 							 ((Sequence)stack.pop()).writeFasta(fqw_os);
 						  }
 					
@@ -74,7 +83,7 @@ public class CachedSequenceOutputStream extends CachedOutput {
 	 return ref.replace('|', '_')+".fa";
  }
 
- public void write(SAMRecord sam)  {
+ public void write(SAMRecord sam, String annotation)  {
 	  String baseQ = sam.getBaseQualityString();
 	  String readSeq = sam.getReadString();
 	  String nme = sam.getReadName();
@@ -91,7 +100,7 @@ public class CachedSequenceOutputStream extends CachedOutput {
 	  		nme = nme+" "+st+"-"+end+" "+sam.isSecondaryOrSupplementary();
  	  }
 	  String ref = separate  ? sam.getReferenceName() : species;
-	  Sequence repeat =  new Sequence(alpha, readSeq,	nme);
+	  Sequence repeat =  new Sequence(alpha, readSeq,	nme+"_"+annotation);
 	  total_count++;
 	//  System.err.println(total_count);
 	  if(! print && total_count> MIN_READ_COUNT) {
