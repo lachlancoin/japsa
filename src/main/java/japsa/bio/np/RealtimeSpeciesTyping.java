@@ -503,7 +503,8 @@ public class RealtimeSpeciesTyping {
 		this.outdir = outdir;
 		this.tree = tree;
 		this.indexFile = indexFile;
-		this.fastqdir= new File(outdir,"fastqs"); fastqdir.mkdir();
+		this.fastqdir= new File(outdir,"fastqs"); 
+		if(writeSep) fastqdir.mkdir();
 		this.unmapped_reads = (new File(outdir, "unmapped")).getAbsolutePath();
 		if(writeUnmapped){
 		this.fqw_unmapped = new CachedFastqWriter(outdir, "unmapped", false, false);
@@ -703,7 +704,7 @@ public static boolean plasmidOnly = true; // only write fastq for plasmids
 		typing(samIter, readNumber, timeNumber);
 		samReader.close();
 	}
-	boolean realtimeAnalysis = false;
+	public static boolean realtimeAnalysis = false;
 	public void typing(Iterator<SAMRecord> samIter, int readNumber, int timeNumber) throws IOException, InterruptedException{
 		//if (readNumber <= 0)
 		//	readNumber = 1;			
