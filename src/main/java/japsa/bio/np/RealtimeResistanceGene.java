@@ -71,6 +71,7 @@ import japsa.seq.FastaReader;
 import japsa.seq.Sequence;
 import japsa.seq.SequenceOutputStream;
 import japsa.seq.SequenceReader;
+import japsa.tools.bio.np.RealtimeResistanceGeneCmd;
 import japsa.tools.seq.CachedFastqWriter;
 import japsa.tools.seq.CachedOutput;
 import japsa.util.HTSUtilities;
@@ -113,6 +114,8 @@ public class RealtimeResistanceGene {
 		}
 	}
 	
+	SequenceOutputStream consensus_output = null;
+	
 	public RealtimeResistanceGene(Integer read, Integer time,File outdir,  String outputFile, String resDB, String recordPrefix) throws IOException {
 	//	File outF = new File(outputFile);
 		
@@ -120,6 +123,7 @@ public class RealtimeResistanceGene {
     File geneListFile = new File(resDB + "/geneList");
     File fastaFile = new File(resDB + "/DB.fasta");
     OutputStream outStream = SequenceOutputStream.makeOutputStream(outputFile);
+    if(runKAlign) consensus_output =  SequenceOutputStream.makeOutputStream(outputFile+".fasta");
     InputStream resDBInputStream = new FileInputStream(geneListFile);
     InputStream fastaInputStream = new FileInputStream(fastaFile);
 
@@ -226,9 +230,12 @@ this.outdir = new File("./");
 					alignmentMap.put(geneID, new ArrayList<Sequence>());
 
 				//put the sequence into alignment list
+				if(RealtimeResistanceGeneCmd.writeABX!=null && RealtimeResistanceGeneCmd.writeABX.matcher(resclass).find()){
 				List<SAMRecord> recs = records.get(resclass);
-				if(recs==null) records.put(resclass,recs = new ArrayList<SAMRecord>());
-				if(writeSep) recs.add(record);
+					if(recs==null)
+						records.put(resclass,recs = new ArrayList<SAMRecord>());
+					recs.add(record);
+				}
 				Sequence readSeq = HTSUtilities.readSequence(record, readSequence, 99, refLength-99);
 				if(runKAlign) alignmentMap.get(geneID).add(readSeq);
 				
@@ -284,6 +291,7 @@ this.outdir = new File("./");
 				co = new CachedFastqWriter(outdir, resc, false, writeAlignedOnly);	
 				fqw.put(resc, (CachedFastqWriter) co);
 			}
+			
 			
 			for(int i=0; i<rec.size(); i++){
 				co.write(rec.get(i), resc);
@@ -495,7 +503,9 @@ this.outdir = new File("./");
 			LOG.info("===Found " + predictedGenes.size() + " vs " + geneMap.size() + "  " + alignmentMapSnap.size() + " with " + jobNo);
 		}
 
-		private void addPreditedGene(String geneID) throws IOException {
+		private void addPreditedGene(String geneID, Sequence consensus) throws IOException {
+			consensus.setName(geneID);
+			consensus.writeFasta(consensus_output);
 			predictedGenes.add(geneID);
 			if (!JSON) {
 				sequenceOutputStream.print(lastTime + "\t" + (this.lastTime - this.startTime) / 1000 + "\t" + lastReadNumber + "\t" + resistGene.currentBaseCount + "\t" + geneID + "\t" + gene2GeneName.get(geneID) + "\t" + gene2Group.get(geneID) + "\n");
@@ -528,6 +538,7 @@ this.outdir = new File("./");
 		protected void close() {
 			try {
 				sequenceOutputStream.close();
+				if(consensus_output!=null) consensus_output.close();
 			} catch (IOException e) {
 				// TODO Auto-generated catch block
 				e.printStackTrace();
@@ -537,7 +548,7 @@ this.outdir = new File("./");
 				try (BufferedWriter bw = new BufferedWriter(new FileWriter("genes2reads.map"))) {
 					for(String sp:predictedGenes){
 						ArrayList<String> readList = allAlignedReads.get(sp);
-						if(readList.size()==0)
+						if(readList==null || readList.size()==0)
 							continue;
 						bw.write(">"+sp+"\n");
 						for(String read:readList)
@@ -614,7 +625,8 @@ this.outdir = new File("./");
 			if (score >= resGeneFinder.resistGene.scoreThreshold){
 				synchronized(resGeneFinder){
 					try {
-						resGeneFinder.addPreditedGene(geneID);
+					
+						resGeneFinder.addPreditedGene(geneID, consensus);
 						LOG.info("ADDF " + geneID);//
 					} catch (IOException e) {						
 						e.printStackTrace();

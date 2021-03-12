@@ -54,6 +54,7 @@ import java.util.Map.Entry;
 import java.util.SortedMap;
 import java.util.Stack;
 import java.util.TreeMap;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -93,8 +94,8 @@ public class RealtimeSpeciesTyping {
 	public static boolean JSON = false;
 	public static double ALPHA=0.05;
 	public static int MIN_READS_COUNT=0;
-	public static boolean writeSep = false;
-	public static boolean writeUnmapped = false;
+	public static Pattern writeSep = null;
+//	public static boolean writeUnmapped = false;
 	private RealtimeSpeciesTyper typer;
 	private OutputStream outputStream;
 	//private BufferedReader indexBufferedReader;
@@ -104,7 +105,7 @@ public class RealtimeSpeciesTyping {
 	 */
 	private double minQual = 1;
 	private boolean twoDOnly = false;
-	CachedOutput fqw_unmapped = null;
+	public CachedOutput fqw_unmapped = null;
 	CachedOutput fqw_filtered = null;
 	final public String unmapped_reads;
 	String indexFile;
@@ -499,15 +500,15 @@ public class RealtimeSpeciesTyping {
 		}
 	}
 	
-	public RealtimeSpeciesTyping(File outdir, String indexFile, NCBITree tree) throws IOException{
+	public RealtimeSpeciesTyping(File outdir, String indexFile, NCBITree tree, boolean writeUnmapped) throws IOException{
 		this.outdir = outdir;
 		this.tree = tree;
 		this.indexFile = indexFile;
 		this.fastqdir= new File(outdir,"fastqs"); 
-		if(writeSep) fastqdir.mkdir();
+		if(writeSep!=null) fastqdir.mkdir();
 		this.unmapped_reads = (new File(outdir, "unmapped")).getAbsolutePath();
 		if(writeUnmapped){
-		this.fqw_unmapped = new CachedFastqWriter(outdir, "unmapped", false, false);
+			this.fqw_unmapped = new CachedFastqWriter(outdir, "unmapped", false, false);
 		}
 		this.fqw_filtered = null;//new CachedFastqWriter(outdir, "filtered");
 
@@ -515,8 +516,8 @@ public class RealtimeSpeciesTyping {
 	final NCBITree tree;
 	
 	//* referenceFile is to get the length map */
-	public RealtimeSpeciesTyping(File indexFile, NCBITree tree, String outputFile, File outdir, File referenceFile) throws IOException{
-		this(outdir, indexFile.getAbsolutePath(), tree);
+	public RealtimeSpeciesTyping(File indexFile, NCBITree tree, String outputFile, File outdir, File referenceFile, boolean unmapped_reads) throws IOException{
+		this(outdir, indexFile.getAbsolutePath(), tree, unmapped_reads);
 		
 		this.referenceFile = referenceFile;
 	//	boolean useTaxaAsSlug=false;
@@ -530,8 +531,8 @@ public class RealtimeSpeciesTyping {
 	
 	}
 
-	public RealtimeSpeciesTyping(String indexFile, OutputStream outputStream, File outdir) throws IOException {
-		this(outdir, indexFile, null);
+	public RealtimeSpeciesTyping(String indexFile, OutputStream outputStream, File outdir, boolean unmapped_reads) throws IOException {
+		this(outdir, indexFile, null, unmapped_reads);
 		LOG.debug("string outputstream");
 	//	this.indexBufferedReader = SequenceReader.openFile(indexFile);
 		this.outputStream = outputStream;
@@ -614,19 +615,19 @@ public static boolean alignedOnly = false; // whether just to output the aligned
 public static boolean fastaOutput = false;
 HashMap<String, Integer> species2Len = new HashMap<String, Integer>();
 public static List<String> speciesToIgnore = null;
-public static boolean plasmidOnly = true; // only write fastq for plasmids
 	private void preTyping() throws IOException{
 		readSpeciesIndex(indexFile, this.seq2Species, species2Len, true);
 		Iterator<String> it = seq2Species.values().iterator();
 		while(it.hasNext()){
 			String sp = it.next();
-			boolean plasmid = sp.contains("plasmid");
+			//boolean plasmid = sp.contains("plasmid");
 		/*	if(plasmid){
 				System.err.println("h");
 			}*/
-			boolean writeSep1 = writeSep 
+			boolean writeSep1 = writeSep !=null
 					&& (speciesToIgnore==null || ! speciesToIgnore.contains(sp))
-					&& (!plasmidOnly  || plasmid); 
+					&& writeSep.matcher(sp).find();
+			
 					
 			if (species2ReadList.get(sp) == null){
 //				LOG.info("add species: "+sp);
@@ -722,7 +723,7 @@ public static boolean plasmidOnly = true; // only write fastq for plasmids
 		}
 		HashSet<String> skipList = new HashSet<>();
 		while (samIter.hasNext()){
-//			try{
+			try{
 			SAMRecord sam = samIter.next();
 		
 			if(sam==null) {
@@ -750,7 +751,9 @@ public static boolean plasmidOnly = true; // only write fastq for plasmids
 			
 			if (sam.getReadUnmappedFlag()){
 				LOG.debug("failed unmapped check");
-				if(fqw_unmapped!=null) this.fqw_unmapped.write(sam,"unmapped");
+				if(fqw_unmapped!=null) {
+					this.fqw_unmapped.write(sam,"unmapped");
+				}
 				continue;			
 			}
 
@@ -806,15 +809,17 @@ public static boolean plasmidOnly = true; // only write fastq for plasmids
 					//readList.add(readName);
 	
 				}
-//			}catch(Exception exc){
-//				exc.printStackTrace();
-//			}
+		}catch(Exception exc){
+				exc.printStackTrace();
+			}
 		}//while
 
 		//final run
 		//typer.simpleAnalysisCurrent();
 		if(fqw_filtered!=null) this.fqw_filtered.close();
-		if(fqw_unmapped!=null) this.fqw_unmapped.close();
+		if(fqw_unmapped!=null) {
+			this.fqw_unmapped.close();
+		}
 		typer.stopWaiting();//Tell typer to stop
 		if(!realtimeAnalysis){
 			typer.run();
