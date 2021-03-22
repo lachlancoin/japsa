@@ -78,7 +78,6 @@ public class RealtimeResistanceGeneCmd extends CommandLine{
 		addDouble("score", 0.0001,  "The alignment score threshold");
 		addString("msa", "kalign",
 			"Name of the msa method, support poa, kalign, muscle and clustalo");
-
 		addString("tmp", "_tmpt",  "Temporary folder");				
 		addString("resDB", null,  "Path to resistance database", true);
 		addString("dbs", null,  "For subsequent species typing", false);
@@ -161,6 +160,7 @@ public static Pattern writeABX = null;
 		String dbPath =  cmdLine.getStringVal("dbPath");
 		String[] dbs = cmdLine.getStringVal("dbs") == null ? null : cmdLine.getStringVal("dbs").split(":");
 		String[] fastqFiles = outfiles.toArray(new String[0]);
+		File excl = null;// can add in excl file here
 		if(dbPath!=null && dbs!=null && outfiles.size()>0){
 			List<String> unmapped_reads = dbs.length>1 ? new ArrayList<String>(): null;
 			CachedOutput.MIN_READ_COUNT=RealtimeSpeciesTyping.MIN_READS_COUNT;
@@ -171,7 +171,7 @@ public static Pattern writeABX = null;
 				List<String> species_output_files = new ArrayList<String>();
 				if(fastqFiles.length==0) break;
 				RealtimeSpeciesTypingCmd.speciesTyping(refDB, null, null, null,fastqFiles,  "output.dat", species_output_files,
-						i==dbs.length-1 ? null : unmapped_reads);
+						i==dbs.length-1 ? null : unmapped_reads, excl);
 				if(unmapped_reads==null) break inner;
 				fastqFiles = unmapped_reads.toArray(new String[0]);
 				for(int j=0; j<unmapped_reads.size(); j++){
@@ -186,16 +186,17 @@ public static Pattern writeABX = null;
 			String[] fastqFile,String readList, File outdir, String output, List<String> outfiles)  throws IOException, InterruptedException{
 	
 
-		List<File> sample_names = new ArrayList<File>();	
-		List<Iterator<SAMRecord>> iterators =  new ArrayList<Iterator<SAMRecord>>();
 		List<SamReader> readers =  new ArrayList<SamReader>();
+		Iterator<SAMRecord> samIter= 
+				bamFile!=null ? 	RealtimeSpeciesTypingCmd.getSamIteratorsBam(bamFile,  readList, maxReads, q_thresh, readers, new File(resDB,"DB.fasta")) : 
+					RealtimeSpeciesTypingCmd.getSamIteratorsFQ(fastqFile, readList, maxReads, q_thresh, new File(resDB,"DB.fasta"));
+				File sample_namek = bamFile!=null ? new File(bamFile[0]) : new File(fastqFile[0]);
+	//	RealtimeSpeciesTypingCmd.getSamIterators(bamFile==null ? null : bamFile, 
+	//			fastqFile==null ? null : fastqFile, readList, maxReads, q_thresh, sample_names,iterators, readers, 
+	//			new File(resDB,"DB.fasta"));
 		
-		RealtimeSpeciesTypingCmd.getSamIterators(bamFile==null ? null : bamFile, 
-				fastqFile==null ? null : fastqFile, readList, maxReads, q_thresh, sample_names,iterators, readers, 
-				new File(resDB,"DB.fasta"));
-		
-		for(int k=0; k<iterators.size(); k++){
-			File outdir1 =new File(resdir, sample_names.get(k)+".resistance");
+		//for(int k=0; k<iterators.size(); k++){
+			File outdir1 =new File(resdir, sample_namek+".resistance");
 			
 			outdir1.mkdirs();
 			RealtimeResistanceGene paTyping = new RealtimeResistanceGene(readPeriod, time, outdir1,outdir1.getAbsolutePath()+"/"+output, resDB.getAbsolutePath(), tmp);		
@@ -203,11 +204,11 @@ public static Pattern writeABX = null;
 			paTyping.scoreThreshold = scoreThreshold;
 			paTyping.twoDOnly = twodonly;
 			paTyping.numThead = thread;
-			paTyping.typing(iterators.get(k));	
+			paTyping.typing(samIter);	
 			paTyping.close();
 			
 			paTyping.getOutfiles(outfiles);
-		}
+		//}
 		for(int i=0; i<readers.size(); i++){
 			readers.get(i).close();
 		}
