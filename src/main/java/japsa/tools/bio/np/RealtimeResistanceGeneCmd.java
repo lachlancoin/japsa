@@ -45,6 +45,8 @@ import htsjdk.samtools.SAMRecord;
 import htsjdk.samtools.SamReader;
 import japsa.bio.np.RealtimeResistanceGene;
 import japsa.bio.np.RealtimeSpeciesTyping;
+import japsa.bio.phylo.KrakenTree;
+import japsa.bio.phylo.NCBITree;
 import japsa.tools.bio.np.RealtimeSpeciesTypingCmd.ReferenceDB;
 import japsa.tools.seq.CachedOutput;
 import japsa.tools.seq.SequenceUtils;
@@ -68,7 +70,7 @@ public class RealtimeResistanceGeneCmd extends CommandLine{
 		setDesc(annotation.scriptDesc());
 
 		addString("writeABX" , null, "strings to match for what to write fastq file out, which can be colon separated, e.g. fosfomycin|vancomycin");
-		addInt("minCountResistance", 2, "Mininum number of mapped reads for a species to be considered (for species typing step)");
+		addInt("minCountResistance", 1, "Mininum number of mapped reads for a species to be considered (for species typing step)");
 		addInt("minCountSpecies", 1, "Mininum number of mapped reads for a species to be considered (for species typing step)");
 
 		addString("output", "output.dat",  "Output file");
@@ -162,22 +164,36 @@ public static Pattern writeABX = null;
 		String[] fastqFiles = outfiles.toArray(new String[0]);
 		File excl = null;// can add in excl file here
 		if(dbPath!=null && dbs!=null && outfiles.size()>0){
-			List<String> unmapped_reads = dbs.length>1 ? new ArrayList<String>(): null;
+			
 			CachedOutput.MIN_READ_COUNT=RealtimeSpeciesTyping.MIN_READS_COUNT;
 			RealtimeSpeciesTyping.writeSep = Pattern.compile("[a-z]");
 			SequenceUtils.secondary = false;
-			inner: for(int i=0; i<dbs.length; i++){
-				ReferenceDB refDB = new ReferenceDB(dbPath, dbs[i], null);
-				List<String> species_output_files = new ArrayList<String>();
-				if(fastqFiles.length==0) break;
-				RealtimeSpeciesTypingCmd.speciesTyping(refDB, null, null, null,fastqFiles,  "output.dat", species_output_files,
-						i==dbs.length-1 ? null : unmapped_reads, excl);
-				if(unmapped_reads==null) break inner;
-				fastqFiles = unmapped_reads.toArray(new String[0]);
-				for(int j=0; j<unmapped_reads.size(); j++){
-					(new File(unmapped_reads.get(j))).deleteOnExit();
+			if(fastqFiles.length>0){
+			outer: for(int k=fastqFiles.length-1; k>=0; k--){
+				System.err.println("species typing for "+fastqFiles[k]);
+				List<String> unmapped_reads = dbs.length>1 ? new ArrayList<String>(): null;
+				String[] fqFiles = new String[] {fastqFiles[k]};
+				File outdirTop = null;
+				inner: for(int i=0; i<dbs.length; i++){
+					ReferenceDB refDB = new ReferenceDB(dbPath, dbs[i], null);
+					List<String> species_output_files = new ArrayList<String>();
+				//	if(fastqFiles.length==0) break;
+					File outD = RealtimeSpeciesTypingCmd.speciesTyping(refDB, null, null, null,fqFiles,  "output.dat", species_output_files,
+							i==dbs.length-1 ? null : unmapped_reads, excl);
+					if(outdirTop==null && !dbs[i].equals("Human"))  outdirTop = outD;
+					if(unmapped_reads==null) break inner;
+					fqFiles = unmapped_reads.toArray(new String[0]);
+					for(int j=0; j<unmapped_reads.size(); j++){
+						(new File(unmapped_reads.get(j))).deleteOnExit();
+					}
+					unmapped_reads.clear();
 				}
-				unmapped_reads.clear();
+				if(outdirTop!=null){
+					KrakenTree overall = new  KrakenTree(outdirTop, "results.krkn");
+					//overa.trim(1e-16);
+					overall.print(new File(outdirTop,"results_combined.krkn"), new String[]{NCBITree.count_tag,NCBITree.count_tag1}, new String[] {"%d","%d"}, true);
+					}
+			}
 			}
 		}
 	}

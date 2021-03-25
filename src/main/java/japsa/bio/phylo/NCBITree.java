@@ -58,10 +58,10 @@ public  class NCBITree extends CommonTree {
 						for(int j=0; j<tags.length; j++)
 						{
 							String count_tag2 = tags[j];
-							Integer cnt = (Integer) id.getAttribute(count_tag2);
-							if(cnt==null) cnt=0;
+							Integer[] cnt = (Integer[]) id.getAttribute(count_tag2);
+							if(cnt==null) cnt=new Integer[] {0};
 							Integer[] v = new Integer[len];
-							v[i] = cnt;
+							v[i] = cnt[0];
 							id.setAttribute(count_tag2, v);
 						}
 					}
@@ -395,13 +395,13 @@ private Node make(String line_, int  level, Node parent, int index){
 	   n.getIdentifier().setAttribute("prefix",prefix);
 	   Integer taxonvalue = null;
 	   if(kraken && !line.equals("unclassified")){
-		   int taxon =Integer.parseInt(lines[index-1]); 
+		   int taxon =  lines[index-1].equals("null") ? 0 : Integer.parseInt(lines[index-1]); 
 		   this.name2Taxa.put(name, taxon);
 		 //  this.taxa2Node.put(taxon, n);
 		   n.getIdentifier().setAttribute("taxon",taxon);
 		  // Integer[] l1 = new Integer[] {Integer.parseInt(lines[1]), Integer.parseInt(lines[2])};
-		   n.getIdentifier().setAttribute(NCBITree.count_tag,Integer.parseInt(lines[1]));
-		   n.getIdentifier().setAttribute(NCBITree.count_tag1,Integer.parseInt(lines[2]));
+		   n.getIdentifier().setAttribute(NCBITree.count_tag,new Integer[] {Integer.parseInt(lines[1])});
+		   n.getIdentifier().setAttribute(NCBITree.count_tag1,new Integer[] {Integer.parseInt(lines[2])});
 
 	   }else{
 	  for(int i=1; i<lines.length; i++){
@@ -515,23 +515,31 @@ Map<String, Integer> name2Taxa= new HashMap<String, Integer>();
 
 final int index;
 
-
-
-
 public NCBITree(File file, boolean useTaxaAsAsslug, boolean kraken) throws IOException {
+this(new File[] {file}, useTaxaAsAsslug, kraken);
+}
+
+
+
+public NCBITree(File[] file, boolean useTaxaAsAsslug, boolean kraken) throws IOException {
 //	this(f, null);
 	index = kraken ? 5 : 0;
 	this.kraken = kraken;
 	    this.useTaxaAsSlug = useTaxaAsAsslug;
 		err= new PrintWriter(new FileWriter(new File("error.txt")));
 		BufferedReader br;
-		if(file.getName().endsWith(".gz")){
-			br = new BufferedReader(new InputStreamReader(new GZIPInputStream(new FileInputStream(file))));
+		inner1: for(int i=0; i<file.length; i++){
+		if(file[i].getName().endsWith(".gz")){
+			br = new BufferedReader(new InputStreamReader(new GZIPInputStream(new FileInputStream(file[i]))));
 		}
 		else{
-			br = new BufferedReader(new FileReader(file));
+			br = new BufferedReader(new FileReader(file[i]));
 		}
 		String nextLine = br.readLine();
+		if(nextLine==null) {
+			br.close();
+			continue inner1;
+		}
 		if(nextLine.indexOf("unclassified")>=0){
 			nextLine = br.readLine();
 		}
@@ -587,15 +595,16 @@ public NCBITree(File file, boolean useTaxaAsAsslug, boolean kraken) throws IOExc
 		
 		}
 		br.close();
+		}
 	   if(err!=null){
 		   err.close();
 	   }
-		for(int i=1; i<roots.size(); i++){
-			Node root = roots.get(i);
-			if(root.getIdentifier().getName().equals("unclassified")){
-				throw new RuntimeException("unclassified should be first entry, if it exists");
-			}
-		}
+		//for(int i=1; i<roots.size(); i++){
+		//	Node root = roots.get(i);
+		//	if(root.getIdentifier().getName().equals("unclassified")){
+		//		throw new RuntimeException("unclassified should be first entry, if it exists");
+		//	}
+		//}
 		if(!kraken)makeTrees();
 	}
 		
