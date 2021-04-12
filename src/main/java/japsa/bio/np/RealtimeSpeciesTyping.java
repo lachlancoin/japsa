@@ -56,8 +56,10 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.SortedMap;
+import java.util.SortedSet;
 import java.util.Stack;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
@@ -74,10 +76,10 @@ import htsjdk.samtools.SamInputResource;
 import htsjdk.samtools.SamReader;
 import htsjdk.samtools.SamReaderFactory;
 import htsjdk.samtools.ValidationStringency;
-import japsa.bio.phylo.GetTaxonID;
 import japsa.bio.phylo.NCBITree;
 import japsa.bio.phylo.Slug;
 import japsa.seq.SequenceOutputStream;
+import japsa.tools.bio.np.ReferenceDB;
 import japsa.tools.seq.CachedFastqWriter;
 import japsa.tools.seq.CachedOutput;
 import japsa.tools.seq.CachedSequenceOutputStream;
@@ -92,13 +94,19 @@ import pal.tree.Node;
  *
  */
 public class RealtimeSpeciesTyping {
+	public static double targetOverlap =0.95;
+	public static double 	 epsilon = 0.001;
+	public static double removeLikelihoodThresh=0.1;
+//	public static boolean exclude = false; //whether to use exclude file to exclude reads
+//	public static boolean writeConsensus = false;
 	public static boolean reestimate = true;
+	public static double overlap_thresh =0.5;
 	public static int mincount=2; // this for designing regions for MSA
-	public static int minlength =100; // min length for MSA
+	public static int minlength =500; // min length for MSA
 	//public static boolean useBases = true;
 	public static double pseudo = 0.001;
 	public static double maxOverlap = .1; // maximum overlap with excl region to remove read
-	public static double base=2; // lower numbers spread out the probability distribution, however it should be base10
+	public static double base_=2; // lower numbers spread out the probability distribution, however it should be base10
 	public static String bases_covered = "bases_covered";
 	public static String fraction_covered="fraction_covered";
 	
@@ -122,28 +130,30 @@ public class RealtimeSpeciesTyping {
 	public static Pattern writeSep = null;
 //	public static boolean writeUnmapped = false;
 	private RealtimeSpeciesTyper typer;
-	private OutputStream outputStream;
+	private OutputStream outputStream_ = null;
+	final File outputFile;
 	//private BufferedReader indexBufferedReader;
 	private HashSet<String> filterSet = new HashSet<String>();
 	/**
 	 * Minimum quality of alignment
 	 */
-	private double minQual = 1;
+	private double minQual = 0;
 	private boolean twoDOnly = false;
 	public CachedOutput fqw_unmapped = null;
 	CachedOutput fqw_filtered = null;
 	final public String unmapped_reads;
-	String indexFile;
+	String exclFile, consensusFile;
+	ReferenceDB refDB = null;
 	Integer currentReadCount = 0;
 	Integer currentReadAligned = 0;
 	Long currentBaseCount = 0L;
 	 File fastqdir, outdir;
-	File referenceFile;
-
+	public final 	File exclude_file_out;
+	public final	File consensus_file_out;
+//	File referenceFile;
+		
 	//seq ID to species name (from index ref file)
-	HashMap<String, Integer> seq2Species = new HashMap<String, Integer>();
-	//HashMap<String, SpeciesCount> species2Count = new HashMap<String, SpeciesCount>();
-	ArrayList<String> speciesList = new ArrayList<String>(); 
+	
 	
 	//to output binned sequences
 	public static boolean OUTSEQ=false;
@@ -202,8 +212,8 @@ public class RealtimeSpeciesTyping {
 	
 	
 	//** sorted based on coverage */
-	static class Interval implements Comparable{
-		int start,end, coverage;
+	public static class Interval implements Comparable{
+		public int start,end, coverage;
 		@Override
 		public boolean equals(Object o){
 			return start== ((Interval)o).start && end== ((Interval)o).end && coverage== ((Interval)o).coverage;  
@@ -223,8 +233,12 @@ public class RealtimeSpeciesTyping {
 		}
 		
 		public Interval(String[] str) {
-			this.start = Integer.parseInt(str[2]);
-			this.end= Integer.parseInt(str[3]);
+			this(str,2,3);
+		}
+		public Interval(String[] str, int start, int end) {
+
+			this.start = Integer.parseInt(str[start]);
+			this.end= Integer.parseInt(str[end]);
 
 		}
 		public int overlap(Interval interval){
@@ -256,6 +270,12 @@ public class RealtimeSpeciesTyping {
 			this.coverage = Math.min(nxt.coverage, coverage);
 			
 		}
+		public double overlap(SAMRecord sam) {
+			int start2 = sam.getAlignmentStart(); int end2 =sam.getAlignmentEnd();
+			int overl = Math.min(end -start2,end2 -start);
+			int minlen = Math.min(end2 - start2, end-start);
+			return Math.min(overl, minlen);
+		}
 	}
 	
 	 
@@ -266,6 +286,7 @@ public class RealtimeSpeciesTyping {
 		
 		Coverage(String species,  Node node, File fastqdir, boolean writeSep1, boolean hierarchical, boolean fasta, boolean separateIntoContigs
 			){
+			
 			this.species = species;
 			this.node = node;
 			fqw = null;
@@ -280,12 +301,14 @@ public class RealtimeSpeciesTyping {
 					fastqdir = new File(fastqdir.getAbsolutePath()+sd.toString());
 				}
 				
-				fqw = fasta ? new CachedSequenceOutputStream(fastqdir, species, true) : 
-				new CachedFastqWriter(fastqdir, species, separateIntoContigs);
+				fqw = fasta ? new CachedSequenceOutputStream(fastqdir, species, true, RealtimeSpeciesTyping.alignedOnly) : 
+				new CachedFastqWriter(fastqdir, species, separateIntoContigs, RealtimeSpeciesTyping.alignedOnly);
 
 			}
 			
 		}
+		
+	
 		
 		Node node; // this is the node in the tree.  We dont initialise this until there are at least one read
 		String species;
@@ -382,7 +405,7 @@ public class RealtimeSpeciesTyping {
 			segsMap.clear();
 			SortedMap<Integer, Interval> coverage = this.coverages.get(index);
 			int non_zero_bases=0;
-			Integer len = species2Len.get(this.contig_names.get(index));// node==null ? null : (Integer) node.getIdentifier().getAttribute("length");
+			Integer len = refDB.species2Len.get(this.contig_names.get(index));// node==null ? null : (Integer) node.getIdentifier().getAttribute("length");
 			while(lock){
 				try{
 					LOG.debug("waiting on lock 1");
@@ -510,7 +533,30 @@ public class RealtimeSpeciesTyping {
 			for(int i=0; i<len; i++){
 				SAMRecord sam= sams.get(i);
 				//if(node==null) node = tree.getNode(species);
-				if(fqw!=null){	
+				
+				if(consensus_list!=null && i==0){
+					String refName = sam.getReferenceName();
+					double len1 = sam.getAlignmentEnd()-sam.getAlignmentStart()+1;
+					SortedSet< Interval>lis = consensus_list.get(refName);
+					//SortedSet< Interval> lis = lis_==null ? null : lis_.tailMap(Math.min(minCoverage, lis_.lastKey()));
+					if(lis!=null){
+						int minCov1 = Math.min(minCoverage, lis.last().coverage);
+						
+						for(Iterator<Interval> it1 = lis.iterator(); it1.hasNext();){
+							
+							Interval interval = it1.next();
+							if(interval.coverage <minCov1) continue;
+							double overlapR = interval.overlap(sam);///(double )len;
+							int len2 = interval.length();
+							if(//overlapR/len1>targetOverlap && 
+									overlapR/len2 > targetOverlap){ // this overlaps the target interval more than 90%
+								fqw.write(sam, this.species, interval);
+								//System.err.println("overlaps excluded region "+speciesList.get(seq2Species.get(refName))+" "+sam.getAlignmentStart()+" "+overlapR);
+								//continue outer;
+							}
+						}
+					}
+				}else if(consensus_list==null && fqw!=null){	
 					//sam.setReadName(sam.getReadName()+" "+sam.getReferenceName()+":"+sam.getAlignmentStart()+"-"+sam.getAlignmentEnd()+" "+sam.getMappingQuality());
 					if(alignedOnly || i==0)  fqw.write(sam, this.species);
 					
@@ -602,7 +648,7 @@ public class RealtimeSpeciesTyping {
 			
 		}
 		public void close(){
-			if(fqw!=null) this.fqw.close(species2Len);
+			if(fqw!=null) this.fqw.close(refDB.species2Len);
 		}
 		public double readCount() {
 			
@@ -614,10 +660,20 @@ public class RealtimeSpeciesTyping {
 		
 	}
 	
-	public RealtimeSpeciesTyping(File outdir, String indexFile, NCBITree tree, boolean writeUnmapped) throws IOException{
+	public RealtimeSpeciesTyping(File outdir, ReferenceDB refDB, 
+			String exclFile,String consensusFile,   boolean writeUnmapped, String outputFile) throws IOException{
 		this.outdir = outdir;
-		this.tree = tree;
-		this.indexFile = indexFile;
+		exclude_file_out = new File(outdir, "exclude.txt");
+		consensus_file_out = new File(outdir, "consensus_regions.txt");
+		this.refDB = refDB;
+		this.outputFile = new File(outdir.getAbsolutePath()+"/"+outputFile);
+		
+		
+	//	this.tree = tree;
+		this.refDB = refDB;
+		//this.indexFile = indexFile;
+		this.exclFile = exclFile; // this lists regions to exclude from count
+		this.consensusFile = consensusFile;
 		this.fastqdir= new File(outdir,"fastqs"); 
 		if(writeSep!=null) fastqdir.mkdir();
 		this.unmapped_reads = (new File(outdir, "unmapped")).getAbsolutePath();
@@ -627,33 +683,31 @@ public class RealtimeSpeciesTyping {
 		this.fqw_filtered = null;//new CachedFastqWriter(outdir, "filtered");
 
 	}
-	final NCBITree tree;
+	//final NCBITree tree;
 	
 	//* referenceFile is to get the length map */
-	public RealtimeSpeciesTyping(File indexFile, NCBITree tree, 
+	public RealtimeSpeciesTyping(ReferenceDB refDB, String exclFile, String consensusFile, 
 			String outputFile, File outdir, File referenceFile, 
 			boolean unmapped_reads) throws IOException{
-		this(outdir, indexFile.getAbsolutePath(), tree, unmapped_reads);
-		
-		this.referenceFile = referenceFile;
+		this(outdir, refDB, exclFile,consensusFile, unmapped_reads, outputFile);
+		//this.referenceFile = referenceFile;
 	//	boolean useTaxaAsSlug=false;
 		
 	//	 addExtraNodesFromSpeciesIndex( tree,  indexFile, null);
-		this.outputStream = SequenceOutputStream.makeOutputStream(outdir.getAbsolutePath()+"/"+outputFile);
 		
 		//this.indexBufferedReader = SequenceReader.openFile(indexFile);
-		typer = new RealtimeSpeciesTyper(this,outputStream, outdir.getName());
+		typer = new RealtimeSpeciesTyper(this,outdir.getName());
 		preTyping();
-		if(reestimate) this.all_reads = new SparseVectorCollection(this.speciesList.size());
+		if(reestimate) this.all_reads = new SparseVectorCollection(refDB.speciesList.size());
 	
 	}
 
-	public RealtimeSpeciesTyping(String indexFile, OutputStream outputStream, File outdir, boolean unmapped_reads) throws IOException {
-		this(outdir, indexFile, null, unmapped_reads);
+	public RealtimeSpeciesTyping(ReferenceDB refDB, String exclFile,String consensusFile,   File outdir, boolean unmapped_reads) throws IOException {
+		this(outdir, refDB, exclFile, consensusFile,  unmapped_reads, "output.data");
 		LOG.debug("string outputstream");
 	//	this.indexBufferedReader = SequenceReader.openFile(indexFile);
-		this.outputStream = outputStream;
-		typer = new RealtimeSpeciesTyper(this, outputStream, outdir.getName());
+	//	this.outputStream = outputStream;
+		typer = new RealtimeSpeciesTyper(this,  outdir.getName());
 		preTyping();
 	}
 
@@ -695,72 +749,36 @@ public class RealtimeSpeciesTyping {
 //
 //	}
 //	SequenceUtils.annotateWithGenomeLength(speciesIndex, seq2Species, species2Len);
-public static void readSpeciesIndex(String indexFile, Map<String, String> seq2Species1, Map<String, Integer> seq2Len, boolean splitPlasmids)throws IOException{
-	BufferedReader indexBufferedReader = GetTaxonID.getBR(new File(indexFile));
-	String line = "";
-	while ( (line = indexBufferedReader.readLine())!=null){
-		if (line.startsWith("#"))
-			continue;
 
-
-		String sp=null,seq=null;
-			
-		String [] toks = line.split("\t");
-		if(toks.length < 2){
-			LOG.info("Illegal speciesIndex file!");
-			System.exit(1);
-		}
-		//	boolean plasmid = splitPlasmids && toks[0].indexOf("plasmid")>=0;
-		sp=toks[0].trim();
-		//if(plasmid){
-		//	sp = sp+".plasmid";
-		//}
-		seq=toks[1].split("\\s+")[0];
-		seq2Len.put(seq,Integer.parseInt(toks[3]));
-		//System.err.println("putting: "+sp);
-		if (seq2Species1.put(seq, sp) != null)
-			throw new RuntimeException("sequence " + seq +" presents multiple time");
-//		else
-//			LOG.info("==>adding " + seq + " to " + sp);
-		
-				
-	}//while
-}
 public static boolean hierarchical = false;
-public static boolean separateIntoContigs = false; // whether to do separate file for each contig
+public static boolean separateIntoContigs = true;//false; // whether to do separate file for each contig
 public static boolean alignedOnly = false; // whether just to output the aligned component in the output fastq
+public static int minCoverage = 2;
 public static boolean fastaOutput = true;
-HashMap<String, Integer> species2Len = new HashMap<String, Integer>();
-HashMap<String, Integer> species2Index = new HashMap<String, Integer>();
+
+Map<String, SortedSet< Interval>> exclude_list  = null;
+Map<String, SortedSet<Interval>> consensus_list  = null;
+
 public static List<String> speciesToIgnore = null;
 	private void preTyping() throws IOException{
-		Map<String, String> seq2Species1 = new HashMap<String, String>();
-		readSpeciesIndex(indexFile, seq2Species1, species2Len, true);
-		for(Iterator<String> it = seq2Species1.keySet().iterator(); it.hasNext();){
-			String seq = it.next();
-			String spec = seq2Species1.get(seq);
-			Integer index = species2Index.get(spec);
-			if(index==null){
-				index = speciesList.size();
-				speciesList.add(spec);
-				species2Index.put(spec,index);
-			}
-			seq2Species.put(seq, index);
-		}
-		
-		for(int i=0; i<speciesList.size(); i++){
-			String sp = speciesList.get(i);
+		exclude_list= getIntervals(exclFile, null);
+		Map<String, List<String>> m =new HashMap<String, List<String>>();
+		consensus_list= getIntervals(consensusFile,m);
+		System.err.println(m);
+		System.err.println(consensus_list);
+		for(int i=0; i<refDB.speciesList.size(); i++){
+			String sp = refDB.speciesList.get(i);
 			boolean writeSep1 = writeSep !=null
 					&& (speciesToIgnore==null || ! speciesToIgnore.contains(sp))
 					&& writeSep.matcher(sp).find();
-				Node n =tree.getNode(sp);
+				Node n =refDB.tree.getNode(sp);
 				species2ReadList.add(new Coverage(sp,n, 	fastqdir, writeSep1, hierarchical, fastaOutput, separateIntoContigs));			
 		}
 	//	tree.makeTrees();
 		
 		//indexBufferedReader.close();
 	
-		LOG.info(seq2Species.size() + "   " + species2ReadList.size());
+		LOG.info(refDB.seq2Species.size() + "   " + species2ReadList.size());
 	//	speciesList.addAll(species2ReadList.keySet());
 		
 		//Write header				
@@ -780,7 +798,7 @@ public static List<String> speciesToIgnore = null;
 		this.twoDOnly = twoOnly;
 	}
 
-	public void typing(String bamFile, int readNumber, int timeNumber, File excl) throws IOException, InterruptedException {
+	public void typing(String bamFile, int readNumber, int timeNumber, List<String> species, boolean runAnalysis) throws IOException, InterruptedException {
 		InputStream bamInputStream;
 
 		if ("-".equals(bamFile))
@@ -788,7 +806,7 @@ public static List<String> speciesToIgnore = null;
 		else
 			bamInputStream = new FileInputStream(bamFile);
 
-		typing(bamInputStream, readNumber, timeNumber, excl);
+		typing(bamInputStream, readNumber, timeNumber, species, runAnalysis);
 	}
 
 	/**\
@@ -804,15 +822,16 @@ public static List<String> speciesToIgnore = null;
 		}
 		
 	}
-	public void typing(InputStream bamInputStream, int readNumber, int timeNumber, File excl) throws IOException, InterruptedException{
+	public void typing(InputStream bamInputStream, int readNumber, int timeNumber, List<String> species, boolean runAnalysis) throws IOException, InterruptedException{
 		SamReaderFactory.setDefaultValidationStringency(ValidationStringency.SILENT);
 		SamReader samReader = SamReaderFactory.makeDefault().open(SamInputResource.of(bamInputStream));
 		SAMRecordIterator samIter = samReader.iterator();
-		typing(samIter, readNumber, timeNumber, excl);
+		typing(samIter, readNumber, timeNumber, species, runAnalysis);
 		samReader.close();
 	}
 	public static boolean realtimeAnalysis = false;
 	class SparseVectorCollection{
+		// each entry in svs represents a multimapping read
 		final double[] abundance;
 		int len;
 		SparseVectorCollection(int numSpecies){
@@ -822,27 +841,42 @@ public static List<String> speciesToIgnore = null;
 			Arrays.fill(abundance, val);
 		}
 		List<SparseVector> svs = new ArrayList<SparseVector>();
-		List<Integer> single = new ArrayList<Integer>();
+	//	List<Integer> single = new ArrayList<Integer>();
 		public void add(SparseVector all_species) {
 			Set<Integer> keys = all_species.keySet();
-			if(keys.size()==1){
-				single.add(keys.iterator().next());
+			if(keys.size()==1 && false){
+		//		single.add(keys.iterator().next());
 			}else{
 				svs.add(all_species);
 			}
 		}
+		
+		public double logLike(){
+			double sc =0;
+			for(int i=0; i<this.svs.size(); i++){
+				SparseVector sv = svs.get(i); // this represents a read
+				double pr = 0;
+				for(Iterator<Integer> it = sv.keyIt();it.hasNext();){
+					Integer j = it.next();
+					pr+= abundance[j] * sv.get(j).doubleValue();
+				}
+				sc+=Math.log(pr);
+			}
+			return sc;
+		}
+		
+		
 		//update abundance
+		//one round of normalisation
 		public void maximisation(double[] v, double pseudo){
 			double[] abund = new double[len];
 			Arrays.fill(abund, pseudo);
-			System.err.println(svs.size()+","+single.size());
-		
-			if(svs.size()==0 && single.size()==0){
-				System.err.println("no matches");
+			if(svs.size()==0){// && single.size()==0){
+			//	System.err.println("no matches");
 				return;//throw new RuntimeException("nothing");
 			}
 			double tot = pseudo*len;//+svs.size()+single.size();
-			tot+=svs.size()+ single.size();//  add 
+			tot+=svs.size();//+ single.size();//  add 
 			double score =0;
 			for(int i=0; i<this.svs.size(); i++){
 				SparseVector sv = svs.get(i);
@@ -861,7 +895,6 @@ public static List<String> speciesToIgnore = null;
 						Integer j = it.next();
 						double sc = abundance[j] * sv.get(j).doubleValue()/totj;
 						abund[j] += sc;
-					
 					}
 					score+=Math.log(scorej);
 				}else{
@@ -870,18 +903,74 @@ public static List<String> speciesToIgnore = null;
 				}
 				
 			}
-			for(int i=0; i< this.single.size(); i++){
-				abund[this.single.get(i)] +=1.0;
-			}
 			double diff = 0;
-			
 			for(int j=0; j<abund.length; j++){
 				double newv = abund[j]/tot;
 				diff += Math.abs(abundance[j] - newv);
 				this.abundance[j] =newv ;
 			}
+			
 			v[0] = score; v[1] = diff;
+			if(zerovs.size()>0){ // if we keeping anything zero
+				Iterator<Integer> iter = zerovs.iterator();
+				while( iter.hasNext()){
+					Integer nxt = iter.next();
+					this.abundance[nxt] = epsilon;
+					
+				}
+				this.renormalise();
+			}
+			
 		}
+		
+		public double setZero(int i, double v1){
+			double v = abundance[i];
+			abundance[i] =v1;
+			this.renormalise();
+			return v;
+		}
+		
+		public void renormalise() {
+			double tot = 0;
+			for(int i =0; i<this.abundance.length; i++){
+				tot+=abundance[i];
+			}
+			for(int i =0; i<this.abundance.length; i++){
+				abundance[i] = abundance[i]/tot;
+			}
+			this.check();
+			
+		}
+
+		public Integer[] nonZero(double d) {
+			List<Integer> l = new ArrayList<Integer>();
+			for(int i=0; i<this.len; i++){
+				if(abundance[i]>d && ! this.zerovs.contains(i)) l.add(i);
+			}
+			return l.toArray(new Integer[0]);
+		}
+Stack<Integer> zerovs = new Stack<Integer>();
+		
+		public void maximisation(double[] v, double pseudo, int numrep, Integer j) {
+			if(j!=null) zerovs.push(j);
+			for(int i=0; i<numrep; i++){
+				this.maximisation(v, pseudo);
+			}
+			if(j!=null) zerovs.pop();
+		}
+
+		public void check() {
+			double tot =0;
+			for(int i=0; i<this.abundance.length; i++){
+				tot+=abundance[i];
+			}
+			if(Math.abs(tot-1.0)>1e-5){
+				throw new RuntimeException("!!! "+tot);
+			}
+			
+		}
+
+		
 	}
 	SparseVectorCollection all_reads = null ;
 	 class AllRecords{
@@ -961,6 +1050,10 @@ public static List<String> speciesToIgnore = null;
 				//	sv.addToEntry(spec,all_species.get(spec));
 				//			-1*Math.pow(10, -1*all_species.get(spec).doubleValue()));
 					Coverage coverage = species2ReadList.get(spec);
+					
+					
+					
+					
 					sams.clear();filtered.clear();
 					int besti = getAll(spec,sams);
 					int q = sams.get(besti).getMappingQuality();
@@ -968,7 +1061,7 @@ public static List<String> speciesToIgnore = null;
 					filter(sams, filtered, besti);
 					if(primary) coverage.addRead(filtered);
 					// we use 0.1 as minimum to avoid zero probability for mq=0 reads
-					this.all_species.update(spec,Math.max(0.1, 1-Math.pow(base,-1.0*(double)q)));
+					this.all_species.update(spec,Math.max(0.1, 1-Math.pow(base_,-1.0*(double)q)));
 				//	this.all_speciesLen.update(spec,getBases(filtered));
 					
 				}
@@ -981,18 +1074,19 @@ public static List<String> speciesToIgnore = null;
 
 		
 	}
-	public void typing(Iterator<SAMRecord> samIter, int readNumber, int timeNumber,
-			File excl) throws IOException, InterruptedException{
+	 
+	public void typing(Iterator<SAMRecord> samIter, int readNumber, int timeNumber, List<String> species, boolean runAnalysis) throws IOException, InterruptedException{
 		//if (readNumber <= 0)
 		//	readNumber = 1;		
-		Map<String, List<Interval>> li = getIntervals(excl);
+	
+		
 		typer.setReadPeriod(readNumber);
 		typer.setTimePeriod(timeNumber * 1000);
 		LOG.info("Species typing ready at " + new Date());
 		String readName = "", refName = "";
 
 		
-		if(realtimeAnalysis){
+		if(realtimeAnalysis && runAnalysis){
 			Thread thread = new Thread(typer);
 			LOG.info("starting RealtimeSpeciesTyper thread");
 			thread.start();
@@ -1002,12 +1096,12 @@ public static List<String> speciesToIgnore = null;
 		//String prevReadName = "";
 		//String prevRefName= "";
 		AllRecords records = new AllRecords(); // for supplementary alignemnts to same reference
-		Interval interval = new Interval();
+		//Interval interval = new Interval();
 		outer: while (samIter.hasNext()){
 			try{
 			SAMRecord sam = samIter.next();
-			interval.start = sam.getAlignmentStart();
-			interval.end = sam.getAlignmentEnd();
+		//	interval.start = sam.getAlignmentStart();
+		//	interval.end = sam.getAlignmentEnd();
 			
 			
 			if(sam==null) {
@@ -1045,12 +1139,13 @@ public static List<String> speciesToIgnore = null;
 			}
 //			String rn = sam.getReferenceName();
 			int len = sam.getAlignmentEnd() - sam.getAlignmentStart()+1;
-			List<Interval>lis = li.get(refName);
+			SortedSet<Interval>lis = exclude_list.get(refName);
 			if(lis!=null){
-				for(int jk=0; jk<lis.size(); jk++){
-					double overlapR = lis.get(jk).overlap(interval)/(double )len;
-					if(overlapR>0.1 ){
-						System.err.println("overlaps excluded region "+speciesList.get(seq2Species.get(refName))+" "+interval+" "+overlapR);
+				for(Iterator<Interval>it1 = lis.iterator(); it1.hasNext();){
+					Interval int1 = it1.next();
+					double overlapR = int1.overlap(sam);///(double )len;
+					if(overlapR/len>overlap_thresh ){
+						System.err.println("overlaps excluded region "+refDB.speciesList.get(refDB.seq2Species.get(refName))+" "+sam.getAlignmentStart()+" "+overlapR);
 						continue outer;
 					}
 				}
@@ -1075,7 +1170,7 @@ public static List<String> speciesToIgnore = null;
 			}
 			
 			
-			if(filterSet.contains(seq2Species.get(refName))){
+			if(filterSet.contains(refDB.seq2Species.get(refName))){
 			
 				if(!sam.isSecondaryOrSupplementary()){
 					skipList.add(readName);
@@ -1097,7 +1192,7 @@ public static List<String> speciesToIgnore = null;
 					/*if(tree!=null){
 						tree.addRead(this.seq2Species.get(sam.getReferenceName()));
 					}*/
-					Integer specI = seq2Species.get(sam.getReferenceName());
+					Integer specI = refDB.seq2Species.get(sam.getReferenceName());
 				
 					records.add(sam, specI);
 				//	readList.addRead(sam);
@@ -1118,38 +1213,134 @@ public static List<String> speciesToIgnore = null;
 		if(fqw_unmapped!=null) {
 			this.fqw_unmapped.close();
 		}
-		double[]v = new double[2];
-		if(all_reads!=null){
-			this.all_reads.maximisation(v, pseudo);
-			System.err.println(v[0]+"\t"+v[1]);
-			for(int i=0; i<10; i++){
-				this.all_reads.maximisation(v, pseudo);
-				System.err.println(v[0]+"\t"+v[1]);
-			}
-		}
 		typer.stopWaiting();//Tell typer to stop
-		if(!realtimeAnalysis){
-			typer.run();
-		}
+		if(runAnalysis){
+			double[]v = new double[2];
+			if( all_reads!=null){
+				double minv = 0.0;
+				while(minv < removeLikelihoodThresh){
+					this.all_reads.maximisation(v, pseudo,10, null);
+					//this.all_reads.check();
+					double[] orig = all_reads.abundance.clone();
+					Integer[] nonZero = all_reads.nonZero(0.01);
+					double[] v1 = new double[2];
+					Double[] vals = new Double[nonZero.length];
+					Double[] new_a = new Double[nonZero.length];
+					Double[] existing_a = new Double[nonZero.length];
+					for(int i=0; i<nonZero.length; i++){
+						Arrays.fill(v1,0);
+						int j = nonZero[i];
+						double a_j = all_reads.setZero(j,epsilon);
+						existing_a[i] = a_j;
+						this.all_reads.maximisation(v1, pseudo,10,j);
+						this.all_reads.check();
+						all_reads.abundance[j] = a_j;
+						new_a[i] = all_reads.abundance[j];
+					//	System.err.println(a_j+" vs "+all_reads.abundance[j]);
+						vals[i] = (v1[0]-v[0])/v[0];
+					}
+					int min_index = findMinAbs(vals);
+					 minv = Math.abs(vals[min_index]);
+					if(minv < removeLikelihoodThresh){
+						all_reads.zerovs.push(nonZero[min_index]);
+						
+					}
+					//System.err.println(Arrays.asList(vals));
+					System.err.println("Can remove "+ refDB.speciesList.get(nonZero[min_index])+ " "+minv+" "+orig[nonZero[min_index]]);
+	//				System.err.println("h");
+				}
+				this.all_reads.maximisation(v, pseudo,10, null);
+				all_reads.check();
+			}
+			Integer[] nonZero = all_reads.nonZero(0.01);
+			//String[] species = new String[nonZero.length];
+			for(int i=0; i<nonZero.length; i++){
+				species.add(refDB.speciesList.get(nonZero[i]));
+			}
+			
+			
+			if( !realtimeAnalysis){
+				typer.run();
+			}
+		}//if(runAnalysis)
 		//samIter.close();
 		
 	}	
 
-	private Map<String, List<Interval>> getIntervals(File excl) {
-		Map<String, List<Interval>> m = new HashMap<String, List<Interval>>();
+	private int findMinAbs(Double[] vals) {
+		int min_i=0;
+		double minv = Math.abs(vals[0]);
+		for(int j=1; j<vals.length; j++){
+			double v = Math.abs(vals[j]);
+			if(v<minv){
+				minv = v;
+				min_i= j;
+			}
+		}
+		return min_i;
+	}
+	private Map<String,SortedSet<Interval>> getIntervals(String excl, Map<String, List<String>> species2Seq ) {
+		//boolean consensus = excl.getName().equals("consensus.txt")""
+		Map<String, SortedSet<Interval>> m = new HashMap<String, SortedSet<Interval>>();
+		Map<String, String>seq2Species = new HashMap<String, String>();
+		boolean consensus = false;
 		if(excl==null) return m;
 		try{
 			BufferedReader br = new BufferedReader(new FileReader(excl));
 			String st = "";
 			while((st = br.readLine())!=null){
 				String[] str = st.split("\t");
+				if(str.length>5) consensus = true;
+			//	if(str.length==1) continue;
 				String seq = str[1];
-				List<Interval> li = m.get(seq);
-				if(li==null)m.put(seq, li = new ArrayList<Interval>());
-				li.add(new Interval(str));
+				SortedSet<Interval> li = m.get(seq);
+				if(li==null) m.put(seq, li = new TreeSet<Interval>());
+				
+				seq2Species.put(seq, str[0]);
+			//	List<String> seqs = species2Seq.get(str[0]);
+				//if(seqs==null) species2Seq.put(str[0], seqs = new ArrayList<String>());
+				if(consensus){ // this for consensus.txt
+					String[] str1 = str[5].split(";");
+					int coverage = Integer.parseInt(str[2]);
+					if(coverage >=2){
+					inner: for(int k=0; k<str1.length; k++){
+						Interval in = new Interval(str1[k].split(","),0,1);
+						if(in.length() > minlength){
+							in.coverage = coverage;
+							for(Iterator<Interval> it1 = li.iterator(); it1.hasNext();){
+								if(it1.next().overlap(in) > 0.90 * in.length()) { // we only want to consider new region which does not significantly overlap current region
+								//	System.err.println(li.get(j)+ " vs "+in);
+									continue inner;
+								}
+							}
+							li.add(in);
+						}
+					}
+					}
+				}else{ // this for exclude.txt
+					li.add(new Interval(str));
+				}
+				
 			}
 		}catch(Exception exc){
 			exc.printStackTrace();
+		}
+		Iterator<String> it = (new HashSet<String>(m.keySet())).iterator();
+		while(it.hasNext()){
+			String st = it.next();
+			if(m.get(st).size()==0){
+				m.remove(st);seq2Species.remove(st);
+			}
+		}
+		Iterator<String> it1 = seq2Species.keySet().iterator();
+		if(species2Seq!=null){
+			while(it1.hasNext()){
+				String st = it1.next();
+				String st1 = seq2Species.get(st);
+				List<String> li = species2Seq.get(st1);
+				if(li==null) species2Seq.put(st1, li = new ArrayList<String>());
+				li.add(st);
+			}
 		}
 		return m;
 	}
@@ -1158,24 +1349,28 @@ public static List<String> speciesToIgnore = null;
 	public class RealtimeSpeciesTyper extends RealtimeAnalysis {
 		MultinomialCI rengine;
 		RealtimeSpeciesTyping typing;
-		public SequenceOutputStream countsOS;
+		public SequenceOutputStream countsOS = null;
 		File krakenResults; //kraken formatted results
 		final String sampleID;
 		//File coverageOutput;
 		File outdir; 
 		
+		public void initOutput() throws IOException{
+			countsOS = SequenceOutputStream.makeOutputStream(outputFile.getAbsolutePath());
+			if(!JSON)
+				countsOS.print("sampleID\ttime\tstep\treads\tbases\tspecies\tprob\terr\ttAligned\tsAligned\tbases_covered\tfraction_covered\tlength_best_contig\tcoverage_percentiles\tmapQ\tlength\talignFrac\tprop_to_most_cov_contig\thighest_cov_contig\n");
+		}
 		
-		public RealtimeSpeciesTyper(RealtimeSpeciesTyping t, OutputStream outputStream, String sampleID) throws IOException {
+		public RealtimeSpeciesTyper(RealtimeSpeciesTyping t,  String sampleID) throws IOException {
 			typing = t;
 			this.outdir = t.outdir;
 			krakenResults = new File(t.outdir,"results.krkn");
 			
 			rengine = new MultinomialCI(ALPHA);
 this.sampleID = sampleID;
-			countsOS = new SequenceOutputStream(outputStream);
-			if(!JSON)
-				countsOS.print("sampleID\ttime\tstep\treads\tbases\tspecies\tprob\terr\ttAligned\tsAligned\tbases_covered\tfraction_covered\tlength_best_contig\tcoverage_percentiles\tmapQ\tlength\talignFrac\tprop_to_most_cov_contig\thighest_cov_contig\n");
 		}
+		//	countsOS = new SequenceOutputStream(outputStream);
+		
 		double[] perc = new double[] {0.5};// 0.5, 0.75, 0.9, 0.95, 0.99}; // percentiles for printing median
 		double[] percQ = new double[] {0.5};
 		double[] percL = new double[] {0.5};
@@ -1199,7 +1394,7 @@ this.sampleID = sampleID;
 			step = (lastTime - startTime)/1000;//convert to second
 
 			int sum = 0;
-			double [] count = new double[typing.speciesList.size()];
+			double [] count = new double[typing.refDB.speciesList.size()];
 			for (int i = 0; i < count.length;i++){
 			//	String spec_name = typing.speciesList.get(i);
 				Coverage cov = typing.species2ReadList.get(i);
@@ -1222,8 +1417,8 @@ this.sampleID = sampleID;
 				segsMap = new TreeMap<Integer, Integer>();// this can capture the distribution of bases against depth
 				try{
 				coverage_out = new PrintWriter(new FileWriter(new File(outdir, "coverage.txt")));
-				regions_to_exclude = new PrintWriter(new FileWriter(new File(outdir, "exclude.txt")));
-				regions_to_use=  new PrintWriter(new FileWriter(new File(outdir, "consensus_regions.txt")));
+				regions_to_exclude = new PrintWriter(new FileWriter(exclude_file_out));
+				regions_to_use=  new PrintWriter(new FileWriter(consensus_file_out));
 				}catch(IOException exc){
 					exc.printStackTrace();
 				}
@@ -1231,7 +1426,7 @@ this.sampleID = sampleID;
 			for (int i = 0; i < count.length;i++){			
 				if (count[i] >= minCount){
 					countArray.add(count[i]);
-					String spec_name = typing.speciesList.get(i);
+					String spec_name = typing.refDB.speciesList.get(i);
 					speciesArray.add(spec_name);
 					LOG.info(step+" : " + spec_name+ " == " + count[i]);
 					//if(count[i]>0){
@@ -1354,7 +1549,7 @@ this.sampleID = sampleID;
 		@Override
 		protected void writeFinalResults() {
 			try{
-			typing.tree.zeroCounts(0, 1);; // add arrays to nodes for recording counts, or reset to zero
+			typing.refDB.tree.zeroCounts(0, 1);; // add arrays to nodes for recording counts, or reset to zero
 			Iterator<Coverage> it = typing.species2ReadList.iterator();
 			while(it.hasNext()){
 				Coverage cov = it.next();
@@ -1363,8 +1558,8 @@ this.sampleID = sampleID;
 				}
 				
 			}
-			typing.tree.trim(1e-16);
-			typing.tree.print(this.krakenResults, new String[]{NCBITree.count_tag,NCBITree.count_tag1}, new String[] {"%d","%d"}, true);
+			typing.refDB.tree.trim(1e-16);
+			typing.refDB.tree.print(this.krakenResults, new String[]{NCBITree.count_tag,NCBITree.count_tag1}, new String[] {"%d","%d"}, true);
 			}catch(Exception exc){
 				exc.printStackTrace();
 			}
@@ -1375,7 +1570,7 @@ this.sampleID = sampleID;
 		
 			Gson gson = new GsonBuilder().serializeNulls().create();
 			List<JsonObject> data = new ArrayList<JsonObject>();
-		
+			if(countsOS==null) this.initOutput();
 			for (int i1 = 0; i1 < order.length;i1++){
 				int i = order[i1];
 				if (results[i][0] <= min_thresh)
@@ -1384,6 +1579,7 @@ this.sampleID = sampleID;
 				Double mid = (results[i][0] + results[i][1])/2;
 				Double err = mid - results[i][0];
 				if(!JSON) {
+				
 					countsOS.print(sampleID+"\t"+lastTime + "\t" + step + "\t" + lastReadNumber + "\t" + typing.currentBaseCount 
 							+ "\t" + speciesArray.get(i).replaceAll("_", " ") + "\t" + mid + "\t" + err + "\t" + typing.currentReadAligned + "\t" + countArray.get(i)+"\t"+medianArray.get(i));
 					countsOS.println();
@@ -1427,7 +1623,7 @@ this.sampleID = sampleID;
 		protected void close(){
 			try{
 				//rengine.end();
-				countsOS.close();
+				if(countsOS!=null) countsOS.close();
 			}catch (Exception e){
 				e.printStackTrace();
 			}

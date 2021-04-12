@@ -47,7 +47,6 @@ import japsa.bio.np.RealtimeResistanceGene;
 import japsa.bio.np.RealtimeSpeciesTyping;
 import japsa.bio.phylo.KrakenTree;
 import japsa.bio.phylo.NCBITree;
-import japsa.tools.bio.np.RealtimeSpeciesTypingCmd.ReferenceDB;
 import japsa.tools.seq.CachedOutput;
 import japsa.tools.seq.SequenceUtils;
 import japsa.util.CommandLine;
@@ -162,7 +161,9 @@ public static Pattern writeABX = null;
 		String dbPath =  cmdLine.getStringVal("dbPath");
 		String[] dbs = cmdLine.getStringVal("dbs") == null ? null : cmdLine.getStringVal("dbs").split(":");
 		String[] fastqFiles = outfiles.toArray(new String[0]);
-		File excl = null;// can add in excl file here
+		String excl = null;// can add in excl file here
+		String consensus = null;
+		File currDir = new File(".");
 		if(dbPath!=null && dbs!=null && outfiles.size()>0){
 			
 			CachedOutput.MIN_READ_COUNT=RealtimeSpeciesTyping.MIN_READS_COUNT;
@@ -175,12 +176,13 @@ public static Pattern writeABX = null;
 				String[] fqFiles = new String[] {fastqFiles[k]};
 				File outdirTop = null;
 				inner: for(int i=0; i<dbs.length; i++){
-					ReferenceDB refDB = new ReferenceDB(dbPath, dbs[i], null);
+					ReferenceDB refDB = new ReferenceDB(new File(dbPath+"/"+dbs[i]));
 					List<String> species_output_files = new ArrayList<String>();
 				//	if(fastqFiles.length==0) break;
-					File outD = RealtimeSpeciesTypingCmd.speciesTyping(refDB, null, null, null,fqFiles,  "output.dat", species_output_files,
-							i==dbs.length-1 ? null : unmapped_reads, excl);
-					if(outdirTop==null && !dbs[i].equals("Human"))  outdirTop = outD;
+					List<String> species = new ArrayList<String>();
+					File[] outD = RealtimeSpeciesTypingCmd.speciesTyping(refDB, null, null,currDir, null,fqFiles,  "output.dat", species_output_files,
+							i==dbs.length-1 ? null : unmapped_reads, excl, consensus, species, true, null, null);
+					if(outdirTop==null && !dbs[i].equals("Human"))  outdirTop = outD[0];
 					if(unmapped_reads==null) break inner;
 					fqFiles = unmapped_reads.toArray(new String[0]);
 					for(int j=0; j<unmapped_reads.size(); j++){
@@ -201,11 +203,11 @@ public static Pattern writeABX = null;
 	public static void resistanceTyping(File resDB, File resdir, String[] bamFile, 
 			String[] fastqFile,String readList, File outdir, String output, List<String> outfiles)  throws IOException, InterruptedException{
 	
-
+		File parentDir = new File(".");
 		List<SamReader> readers =  new ArrayList<SamReader>();
 		Iterator<SAMRecord> samIter= 
-				bamFile!=null ? 	RealtimeSpeciesTypingCmd.getSamIteratorsBam(bamFile,  readList, maxReads, q_thresh, readers, new File(resDB,"DB.fasta")) : 
-					RealtimeSpeciesTypingCmd.getSamIteratorsFQ(fastqFile, readList, maxReads, q_thresh, new File(resDB,"DB.fasta"));
+				bamFile!=null ? 	RealtimeSpeciesTypingCmd.getSamIteratorsBam(parentDir, bamFile,  readList, maxReads, q_thresh, readers, new File(resDB,"DB.fasta")) : 
+					RealtimeSpeciesTypingCmd.getSamIteratorsFQ(fastqFile, readList, maxReads, q_thresh, new File(resDB,"DB.fasta"), null);
 				File sample_namek = bamFile!=null ? new File(bamFile[0]) : new File(fastqFile[0]);
 	//	RealtimeSpeciesTypingCmd.getSamIterators(bamFile==null ? null : bamFile, 
 	//			fastqFile==null ? null : fastqFile, readList, maxReads, q_thresh, sample_names,iterators, readers, 

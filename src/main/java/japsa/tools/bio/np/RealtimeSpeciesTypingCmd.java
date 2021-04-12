@@ -37,14 +37,17 @@ package japsa.tools.bio.np;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.io.FileWriter;
 import java.io.FilenameFilter;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Stack;
 import java.util.regex.Pattern;
 
 import htsjdk.samtools.SAMRecord;
@@ -54,10 +57,8 @@ import htsjdk.samtools.SamReaderFactory;
 import htsjdk.samtools.ValidationStringency;
 import japsa.bio.np.RealtimeResistanceGene;
 import japsa.bio.np.RealtimeSpeciesTyping;
-import japsa.bio.phylo.CSSProcessCommand;
 import japsa.bio.phylo.KrakenTree;
 import japsa.bio.phylo.NCBITree;
-import japsa.bio.phylo.Trie;
 import japsa.tools.seq.CachedOutput;
 import japsa.tools.seq.SequenceUtils;
 import japsa.util.CommandLine;
@@ -73,10 +74,11 @@ import japsa.util.deploy.Deployable;
 	seeAlso = "jsa.np.npreader, jsa.np.rtStrainTyping, jsa.np.rtResistGenes, jsa.util.streamServer, jsa.util.streamClient"
 	)
 public class RealtimeSpeciesTypingCmd extends CommandLine {
-
+static boolean reduceToSpecies = false;// whether to re-run after reducing db to identified species
+static boolean buildConsensus = false;// this re-runs analysis and builds consensus;
 	static double q_thresh=7; 
 	static double qual=1;
-	
+	static boolean deleteUnmappedIntermediates = true;
 	static String filter;
 	
 	static boolean twoOnly=false;
@@ -92,22 +94,27 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 		addString("resdir", "japsa_species_typing", "Results directory");
 		addString("output", "output.dat",  "Output file, - for standard output");		
 		addString("bamFile", null,  "The bam file",false);
-		
+		addString("consensusFile", null,  "consensus file",false);
+		addBoolean("deleteUnmapped",true, "whehter to delete the unmapped reads",false);
 		addString("fastqFile", null, "Fastq file", false);
 		addString("dbPath",null, "path to databases",false);
 		addString("resdb",null, "Resistance database",false);
 		addString("dbs",null, "databases to use in path",false);
-		addString("speciesToRestrict",null, "species to restrict search",false);
+		addString("speciesFile",null, "species to restrict search",false);
 		addBoolean("realtimeAnalysis", false, "whether to run analysis in realtime");
 		addBoolean("alignedOnly", false, "whether to output only the aligned portion of a read in fasta file");
-
+		addDouble("removeLikelihoodThresh", 0.0, "likelihood proportion to remove");
+		addBoolean("reduceToSpecies",false, "whether to re-run alignment on reduced set of species, after E-M training and trimming");
 	//	addString("reference", null, "Reference db if fastq is presented", false);
 	//	addString("indexFile", null,  "indexFile ",true);
-		addString("mm2Preset", null,  "mm2Preset ",false);
+		addString("mm2Preset", "map-ont",  "mm2Preset ",false);
 		addString("mm2_path", "/sw/minimap2/current/minimap2",  "minimap2 path", false);
+		addString("abpoa_path", "/sw/abpoa/current/abpoa",  "abpoa path", false);
+
 		addString("readList", null,  "file with reads to include", false);
 		addInt("maxReads",Integer.MAX_VALUE, "max reads to process", false );
-		
+		addInt("minCoverage",2, "minimum coverage from consensus file", false );
+		addInt("minLength",500, "minimum length from consensus file", false );
 		//addString("mm2Preset", "splice",  "preset for minimap2", false);
 	//	addBoolean("writeBed", false, "whether to write bed",false);
 		//addString("mm2Preset", "map-ont",  "preset for minimap2", false);
@@ -115,10 +122,10 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 		long mem = (Runtime.getRuntime().maxMemory()-1000000000);
 		addString("mm2_memory", mem+"",  "minimap2 memory", false);
 		addString("excludeFile",null,  "file of regions to exclude", false);
-
+		addBoolean("buildConsensus",false,  "builds the consensus by running twice", false);
 		addDouble("fail_thresh", 7.0,  "median phred quality of read", false);
 		addInt("mm2_threads", 4, "threads for mm2", false);
-		addDouble("qual", 1,  "Minimum alignment quality");
+		addDouble("qual", 0,  "Minimum alignment quality");
 		addBoolean("twodonly", false,  "Use only two dimentional reads");
 		addDouble("alpha", 0.05, "Paramater alpha from multinomialCI");
 		addInt("minCount", 5, "Mininum number of mapped reads for a species to be considered");
@@ -152,7 +159,7 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 		}
 	}
 	
-	public static Iterator<SAMRecord>  getSamIteratorsFQ( String[] fastqFile, String readListSt, int maxReads,double q_thresh,	File refFile
+	public static Iterator<SAMRecord>  getSamIteratorsFQ( String[] fastqFile, String readListSt, int maxReads,double q_thresh,	File refFile,Stack<File> keepBAM
 		
 			) throws IOException, FileNotFoundException, InterruptedException{
 		String[] files =  fastqFile;
@@ -167,26 +174,29 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 		
 		String mm2_index = SequenceUtils.minimapIndex(refFile,  false,saveSeqs);
 		//sample_name.add (new File(files[0]));
-		return  SequenceUtils.getSAMIteratorFromFastq(files, mm2_index, maxReads, readList, q_thresh);
+		return  SequenceUtils.getSAMIteratorFromFastq(files, mm2_index, maxReads, readList, q_thresh, keepBAM);
 	}
 	
-	public static Iterator<SAMRecord>  getSamIteratorsBam(String[] bamFile ,String readListSt, int maxReads,double q_thresh,
+	public static Iterator<SAMRecord>  getSamIteratorsBam(File parentDir, String[] bamFile ,String readListSt, int maxReads,double q_thresh,
 			List<SamReader> samReaders,File refFile
 			) throws IOException, FileNotFoundException{
-	
+		 System.err.println(Arrays.asList(bamFile));
 		Collection<String> readList=SequenceUtils.getReadList(readListSt, true);
 		String[] files = bamFile;
-		if(bamFile.length==1 && !(new File(bamFile[0])).exists()) {
-			files = (new File(".")).list(new MatchFilter(bamFile[0], "bam|sam"));	
+		if(bamFile.length==1 && !(new File(parentDir, bamFile[0])).exists()) {
+			files = parentDir.list(new MatchFilter(bamFile[0], "bam|sam"));	
 		}
+		
 		if(files.length==0) {
+		
+		//	else System.err.println(Arrays.asList(fastqFile));
 			throw new RuntimeException("no files match input request");
 		}
 	//	String[] sample_name = new String[files.length];
 		//sample_name.add (new File(files[0]));
 		List<Iterator> iterators = new ArrayList<Iterator>();
 		for(int i=0; i<files.length; i++){
-			File filek = new File(files[i]);//.replace(".gz","");//.substring(0, files[i].lastIndexOf('.'));
+			File filek = new File(parentDir, files[i]);//.replace(".gz","");//.substring(0, files[i].lastIndexOf('.'));
 			Iterator<SAMRecord> samIter = null;
 			SamReader samReader= null;
 			SamReaderFactory.setDefaultValidationStringency(ValidationStringency.SILENT);
@@ -204,60 +214,16 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 		return SequenceUtils.getCombined(iterators.toArray(new Iterator[0]), false, true);
 	}
 	
-	static class ReferenceDB{
-		// this class encapsulates everything required for a referenceDB
-		File refFile, modDB,speciesIndex;
-		
-		String dbs;
-		NCBITree tree;
-		public ReferenceDB(String dbPath, String dbs, String speciesFile)  throws IOException{
-			this.dbs  = dbs;
-			File dbdir = new File(dbPath+"/"+dbs);
-			 refFile = new File(dbdir, "genomeDB.fna.gz");
-			 File taxaDir = new File(dbPath+"/taxdump");
-			speciesIndex=Trie.getIndexFile(taxaDir, refFile);
-			String treef = CSSProcessCommand.getTree(taxaDir,dbdir, speciesIndex, false).getAbsolutePath();
-			boolean useTaxaAsSlug=false;
-			String treef_mod = treef+".mod";
-			tree = new NCBITree(new File(treef), useTaxaAsSlug);
-			tree.addSpeciesIndex(speciesIndex);
-			//tree.print(new File(treef_mod)); // this prints out to tree
-	//		if(true)System.exit(0);
-			// treef = dbPath+"/"+dbs+"/"+ "commontree.txt.css.mod";
-			 modDB = new File("./db");
-			 if(speciesFile!=null){
-				 this.update(speciesFile, treef);
-			 }
-			
-		}
-		public void update(String speciesFile, String treef) {
-			
-			Collection<String> species = SequenceUtils.getReadList(speciesFile,false);
-			if(species!=null){
-				 modDB.mkdir();
-				File speciesF = new File(speciesFile);
-				long last_m = speciesF.lastModified();
-				File refFileOut = new File(modDB,dbs+"_"+speciesFile+"."+last_m+".fna.gz");
-				File indexFileOut = new File(modDB,dbs+"_"+speciesFile+"_speciesIndex."+last_m+".txt");
-				if(!refFileOut.exists()){
-					SequenceUtils.mkdb(refFile, treef, speciesIndex.getAbsolutePath(), species, refFileOut.getAbsolutePath(), indexFileOut.getAbsolutePath());
-				}
-				refFile = refFileOut;//.getAbsolutePath();
-				speciesIndex  = indexFileOut;
-			}
-		}
-		
-	}
-	
 	
 	
 	static void setParams(CommandLine cmdLine){
-		
+		RealtimeSpeciesTypingCmd.deleteUnmappedIntermediates = cmdLine.getBooleanVal("deleteUnmapped");
 		SequenceUtils.mm2_threads= cmdLine.getIntVal("mm2_threads");
 		SequenceUtils.mm2_mem = cmdLine.getStringVal("mm2_mem");
 		SequenceUtils.mm2_path = cmdLine.getStringVal("mm2_path");
 		SequenceUtils.mm2Preset = cmdLine.getStringVal("mm2Preset");
 		SequenceUtils.mm2_splicing = null;//
+		SequenceUtils.apboa_path = cmdLine.getStringVal("abpoa_path");
 		SequenceUtils.secondary = true;
 		RealtimeSpeciesTypingCmd.q_thresh = cmdLine.getDoubleVal("fail_thresh");
 		RealtimeSpeciesTypingCmd.filter = cmdLine.getStringVal("filter");
@@ -273,6 +239,8 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 		RealtimeSpeciesTyping.MIN_READS_COUNT = cmdLine.getIntVal("minCount");
 		RealtimeSpeciesTyping.writeSep =cmdLine.getStringVal( "writeSep")==null ? null :  Pattern.compile(cmdLine.getStringVal( "writeSep"));
 		RealtimeSpeciesTyping.alignedOnly     = cmdLine.getBooleanVal("alignedOnly");//"qual");				
+		RealtimeSpeciesTyping.minCoverage = cmdLine.getIntVal("minCoverage");
+		RealtimeSpeciesTyping.minlength = cmdLine.getIntVal("minLength");
 
 		//boolean match = RealtimeSpeciesTyping.writeSep.matcher("abcde").find();
 	//System.err.println(match);
@@ -294,36 +262,102 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 		setParams(cmdLine);
 		resdir = new File(cmdLine.getStringVal("resdir"));
 		resdir.mkdirs();
+		RealtimeSpeciesTyping.removeLikelihoodThresh = cmdLine.getDoubleVal("removeLikelihoodThresh");
 	    String output    = cmdLine.getStringVal("output");
 		String bamFile   = cmdLine.getStringVal("bamFile");		
 		String fastqFile = cmdLine.getStringVal("fastqFile");
+		reduceToSpecies = cmdLine.getBooleanVal("reduceToSpecies");
 		String resDB = cmdLine.getStringVal("resdb");
 		if(bamFile==null && fastqFile==null) throw new RuntimeException("must define fastqFile or bam file");
 		String dbPath = cmdLine.getStringVal("dbPath");
 		String[] dbs = cmdLine.getStringVal("dbs").split(":");
 		String readList = cmdLine.getStringVal("readList");
-		String speciesFile=cmdLine.getStringVal("species");
+		final String speciesFile=cmdLine.getStringVal("speciesFile");
 		List<String> out_fastq = new ArrayList<String>();
 		String exclfile = cmdLine.getStringVal("excludeFile");
-		File excl = exclfile==null ? null : new File(exclfile);
+		buildConsensus = cmdLine.getBooleanVal("buildConsensus");
+		//File excl = exclfile==null ? null : new File(exclfile);
+		//File consensus = consensusFile==null ? null : new File(consensusFile);
 		String[] fastqFiles = fastqFile==null ? null : fastqFile.split(":");
 		String[] bamFiles = bamFile==null ? null : bamFile.split(":");
 		List<String> unmapped_reads = dbs.length>1 ? new ArrayList<String>(): null;
 		File outdirTop = null;
 		inner: for(int i=0; i<dbs.length; i++){
-			System.err.println(dbs[i]);
-			ReferenceDB refDB = new ReferenceDB(dbPath, dbs[i], speciesFile);
-			File outD = speciesTyping(refDB, i==0 ? resdir : null, readList, bamFiles, fastqFiles, output,
-							out_fastq, i==dbs.length-1 ? null : unmapped_reads, excl);
-			if(outdirTop==null && !dbs[i].equals("Human")) outdirTop = outD;
+		//	System.err.println(dbs[i]);
+			ReferenceDB refDB = null;
+			 File taxdmp = new File(dbPath+"/taxdump");
+			if(speciesFile!=null){
+				 File modDB = new File("./db");
+				 File newDB = new File(modDB, dbs[i]+"_"+speciesFile);//+"."+last_m);
+				 if(newDB.exists()){
+				
+					 refDB = new ReferenceDB(newDB, taxdmp);
+				 }
+			}
+			if(refDB==null){
+				refDB = new ReferenceDB(new File(dbPath+"/"+dbs[i]));
+		
+				if(speciesFile!=null){
+					refDB = refDB.update(new File(speciesFile));
+				}
+			}
+			String consensusFile = cmdLine.getStringVal("consensusFile");
+			List<String> species = new ArrayList<String>();
+			File currDir = new File(".");
+			Stack<File> bamOut = buildConsensus ?new Stack<File>() : null;
+			File[] outDs = speciesTyping(refDB, i==0 ? resdir : null, readList, currDir, bamFiles, fastqFiles, output,
+							out_fastq, i==dbs.length-1 ? null : unmapped_reads, exclfile, consensusFile, species, true, bamOut, null);
+			if(buildConsensus && consensusFile==null){
+				String consensusFile1 = consensusFile==null ? outDs[1].getAbsolutePath(): consensusFile;
+				System.err.println("rerunning to build consensus");
+				String[] bamFiles1 = bamFiles;
+				File bamO = bamOut.pop();
+				System.err.println(bamO);
+				if(bamFiles1==null)bamFiles1 = new String[] {bamO.getName()};
+				outDs = speciesTyping(refDB, i==0 ? resdir : null, readList, bamO.getParentFile(), bamFiles1, null, output,
+						null, null, exclfile, consensusFile1, null, false, null, outDs[0]);
+				
+				bamO.delete();
+				File consensus = SequenceUtils.makeConsensus(new File(outDs[0], "fastqs"),4, true);
+			}
+			if(speciesFile ==null && species.size()>0 &&  reduceToSpecies){
+				File specFile1 = new File(resdir, dbs[i]+"."+System.currentTimeMillis()+".txt");
+				PrintWriter pw = new PrintWriter(new FileWriter(specFile1));
+				for(int k=0; k<species.size(); k++){
+					pw.println(species.get(k));
+				}
+				pw.close();
+				List<String> species1 = new ArrayList<String>();
+				refDB = refDB.update(specFile1);
+			//	consensusFile = cmdLine.getStringVal("consensusFile");
+				String[] fastqFiles1 = fastqFiles;
+				System.err.println("running on subset");
+				outDs = speciesTyping(refDB, i==0 ? resdir : null, readList, currDir, null, fastqFiles1, output,
+						out_fastq,  null , exclfile, consensusFile, species1, true, bamOut, null);
+				System.err.println(species1.size());
+				if(buildConsensus && consensusFile==null){
+					String consensusFile1 = consensusFile==null ? outDs[1].getAbsolutePath(): consensusFile;
+					System.err.println("rerunning to build consensus");
+					String[] bamFiles1 = bamFiles;
+					File bamO = bamOut.pop();
+					if(bamFiles1==null)bamFiles1 = new String[] {bamO.getName()};
+					outDs = speciesTyping(refDB, i==0 ? resdir : null, readList, bamO.getParentFile(),  bamFiles1, null, output,
+							null,  null , exclfile, consensusFile1,null, false, null, outDs[0]);
+					bamO.delete();
+					File consensus = SequenceUtils.makeConsensus(new File(outDs[0], "fastqs"),2, true);
+				}
+			}
+			if(outdirTop==null && !dbs[i].equals("Human")) outdirTop = outDs[0];
 			bamFiles = null;
 			if(unmapped_reads==null) break inner;
 			fastqFiles = unmapped_reads.toArray(new String[0]);
+			if(deleteUnmappedIntermediates){
 			if(i!=dbs.length-1){
 				//dont delete the final unmapped reads
 				for(int j=0; j<unmapped_reads.size(); j++){
 							(new File(unmapped_reads.get(j))).deleteOnExit();
 				}
+			}
 			}
 			unmapped_reads.clear();
 			if(fastqFiles.length==0) break inner;
@@ -345,47 +379,50 @@ public class RealtimeSpeciesTypingCmd extends CommandLine {
 	}
 	
 	
-	public static File speciesTyping(ReferenceDB refDB, File resdir, String readList,
+	public static File[] speciesTyping(ReferenceDB refDB, File resdir, String readList,
+			File parentDir,
 		 String [] bamFile, String[] fastqFile, String output,	List<String> out_fastq , 
-		 List<String> unmapped_reads, File exclude
+		 List<String> unmapped_reads, String exclude, String consensus,
+		 List<String> species, boolean runAnalysis, Stack<File> keepBAM, File outdir
 			) throws IOException, InterruptedException{
 		
 		
 			List<SamReader> readers =  new ArrayList<SamReader>();
 			Iterator<SAMRecord> samIter= 
-					bamFile!=null ? 	RealtimeSpeciesTypingCmd.getSamIteratorsBam(bamFile,  readList, maxReads, q_thresh, readers,  refDB.refFile) : 
-						RealtimeSpeciesTypingCmd.getSamIteratorsFQ(fastqFile, readList, maxReads, q_thresh, refDB.refFile);
+					bamFile!=null ? 	RealtimeSpeciesTypingCmd.getSamIteratorsBam(parentDir, bamFile,  readList, maxReads, q_thresh, readers,  refDB.refFile) : 
+						RealtimeSpeciesTypingCmd.getSamIteratorsFQ(fastqFile, readList, maxReads, q_thresh, refDB.refFile, keepBAM);
 			File outdir_new  = null;
 			if(resdir!=null){
 				outdir_new =  new File(resdir,refDB.dbs);
 				outdir_new.mkdir();
 			}
 			File sample_namesk = bamFile!=null ?  new File(bamFile[0]) : new File(fastqFile[0]);
-				File outdir = outdir_new!=null ?  new File(outdir_new+"/"+sample_namesk.getName()) : new File(sample_namesk.getAbsolutePath()+"."+refDB.dbs+".jST");
+				if(outdir==null)  outdir = outdir_new!=null ?  new File(outdir_new+"/"+sample_namesk.getName()) : new File(sample_namesk.getAbsolutePath()+"."+refDB.dbs+".jST");
 				outdir.mkdirs();
 			
 			//	SamReader samReader = readers.size()>0 ? readers.get(k) : null;
 				RealtimeSpeciesTyping paTyping =
-						new RealtimeSpeciesTyping(refDB.speciesIndex,	
-								refDB.tree, output,outdir,  refDB.refFile, unmapped_reads!=null);
+						new RealtimeSpeciesTyping(refDB,	exclude,consensus,
+								 output,outdir,  refDB.refFile, unmapped_reads!=null);
 				
 				paTyping.setMinQual(qual);
 				paTyping.setTwoOnly(twoOnly);	
 				paTyping.setFilter(filter);
 				try{
-				paTyping.typing(samIter, number, time, exclude);
+				paTyping.typing(samIter, number, time, species, runAnalysis);
 				}catch(InterruptedException exc){
 					exc.printStackTrace();
 				}
 				for(int i=0; i<readers.size(); i++) readers.get(i).close();
 				readList = null;
-				paTyping.getOutfiles(out_fastq);
+				if(out_fastq!=null && runAnalysis) paTyping.getOutfiles(out_fastq);
 				if(paTyping.fqw_unmapped!=null){
 					paTyping.fqw_unmapped.getOutFile(unmapped_reads);
 				}
 				//files[k] = paTyping.unmapped_reads;  // unmapped reads taken forward to next database
 	//	}dbs
-		return outdir;
+		
+		return new File[] {outdir,paTyping.consensus_file_out} ;
 		//paTyping.typing(bamFile, number, time);		
 	}
 }
