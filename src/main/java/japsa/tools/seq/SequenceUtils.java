@@ -374,35 +374,47 @@ public static File makeConsensus(File file, int threads, boolean deleteFa) {
 	
 	 
 	 static Iterator<FastqRecord> getFastaIterator(InputStream ins) throws IOException {
-		 final FastaReader fr = new FastaReader(ins);
-		 if(!fr.hasNext()) return null;
+		 final BufferedReader br = new BufferedReader(new InputStreamReader(ins));//FastaReader fr = new FastaReader(ins);
+		 String nxtLine1 = br.readLine();
+		 if(nxtLine1==null){
+			 System.err.println("warning, no entries");
+			 return null;
+		 }
+		/* if(!br.hasNext()) {
+			 throw new RuntimeException ("!!");
+			 //
+		//	 System.err.println(br.readLine());
+			 return null;
+		 }*/
 		return new Iterator<FastqRecord>(){
-			Alphabet alph = Alphabet.DNA16();
-			
+			String nxtLine = nxtLine1;
 			
 			@Override
 			public boolean hasNext() {
-				try{
-				boolean nxt =  fr.hasNext();
-				if(!nxt) fr.close();
-				return nxt;
-				}catch(IOException exc){
-					exc.printStackTrace();
-				}
-				return false;
+					boolean hasNext =  nxtLine!=null;
+					
+					return hasNext;
 			}
 
 			@Override
 			public FastqRecord next() {
 				FastqRecord fq = null;
-				
 				try{
-				Sequence seq = fr.nextSequence(alph);
-				if(seq==null) {
-					fr.close();
+				if(nxtLine==null) {
+					br.close();
 					return null;
 				}
-				fq  =   new FastqRecord(seq.getName(),	seq.toString(),	null,null);
+				
+					int i1 = Math.max(nxtLine.indexOf(' '), nxtLine.length());
+					String nme = nxtLine.substring(1, i1);
+					StringBuffer sb = new StringBuffer();
+					while((nxtLine=br.readLine())!=null){
+						if(nxtLine.startsWith(">")) break;
+						sb.append(nxtLine);
+					}
+					if(nxtLine==null) br.close();
+				
+				fq  =   new FastqRecord(nme,	sb.toString(),	null,null);
 				}catch(IOException exc){
 					exc.printStackTrace();
 				}
@@ -576,8 +588,11 @@ public static File makeConsensus(File file, int threads, boolean deleteFa) {
 					bam = true;
 					samReader = SamReaderFactory.makeDefault().open(SamInputResource.of(is));
 				}else{
-					is= input[k].endsWith(".gz")  ? new GZIPInputStream(new FileInputStream(inputFile[k])) : new FileInputStream(inputFile[k]);
-					fasta = input[k].endsWith(".fa") || input[k].endsWith(".fasta");
+					if(!inputFile[k].exists()) throw new RuntimeException("!!! does not exists");
+					boolean gz = input[k].endsWith(".gz");
+					fasta = input[k].endsWith(".fa") || input[k].endsWith(".fasta") || input[k].endsWith(".fa.gz") || input[k].endsWith(".fasta.gz");
+
+					is= gz   ? new GZIPInputStream(new FileInputStream(inputFile[k])) : new FileInputStream(inputFile[k]);
 					System.err.println("input file "+input[k]+" "+fasta);
 
 				}
@@ -714,6 +729,8 @@ public static File makeConsensus(File file, int threads, boolean deleteFa) {
 			}
 			//System.err.println(iterator.hasNext());
 			 SAMRecord nxt =  iterator==null ? null :  iterator.next() ;
+		//		System.err.println(nxt.getReadName()+" "+bfw==null);
+
 			 if(this.bfw!=null && nxt!=null){
 				 this.cntsAdded++;
 				 bfw.addAlignment(nxt);
@@ -766,8 +783,9 @@ public static File makeConsensus(File file, int threads, boolean deleteFa) {
 		//	System.err.println(q);
 			return q;
 	 }
-	 public static Iterator<SAMRecord> getFilteredIterator(Iterator<SAMRecord> samIter, Collection<String> reads, int max_reads, double q_thresh){
-		 return new FilteredIterator(samIter, reads,max_reads, q_thresh);
+	 public static Iterator<SAMRecord> getFilteredIterator(Iterator<SAMRecord> samIter, Collection<String> reads, int max_reads, double q_thresh, 
+			 boolean flipName){
+		 return new FilteredIterator(samIter, reads,max_reads, q_thresh, flipName);
 	 }
 	 
 	 public static class FilteredIterator implements Iterator<SAMRecord>{
@@ -777,12 +795,17 @@ public static File makeConsensus(File file, int threads, boolean deleteFa) {
 		 SAMRecord nxt;
 		 final double qual_thresh;
 		 int cnt=0;
-		 public FilteredIterator(Iterator<SAMRecord>sam , Collection<String> reads, int max_reads, double qual_thresh){
+		 boolean flipname;
+		 public FilteredIterator(Iterator<SAMRecord>sam , Collection<String> reads, int max_reads, double qual_thresh, boolean flipname){
 			 this.samIter= sam;
+			 this.flipname = flipname;
 			 this.reads = reads;
 			 this.qual_thresh= qual_thresh;
 			 this.max_reads = max_reads;
 			 nxt = getNext();
+			 if(nxt==null){
+				 throw new RuntimeException(" iterator is empty");
+			 }
 		 }
 		@Override
 		public boolean hasNext() {
@@ -793,6 +816,13 @@ public SAMRecord next(){
 	SAMRecord nxt1 = nxt;
 	cnt++;
 	nxt = getNext();
+	if(flipname){
+		String refname = nxt1.getReferenceName();
+		String readname = nxt1.getReadName();
+		nxt1.setReferenceName(readname);
+		nxt1.setReadName(refname);
+		
+	}
 	return nxt1;
 }
 		
@@ -802,8 +832,8 @@ public SAMRecord next(){
 				SAMRecord nxt = samIter.next();
 				String nme = nxt.getReadName();
 				if(reads==null || reads.contains(nme)){
-					
-					if(getQual(nxt.getBaseQualities())>=qual_thresh) {
+					byte[] b = nxt.getBaseQualities();
+					if(b.length==0 || getQual(b)>=qual_thresh) {
 						return nxt;
 					}
 				}
